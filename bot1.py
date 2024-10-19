@@ -43,6 +43,10 @@ def get_market_cap_from_dexscreener(contract_address):
         data = response.json()
         pairs = data.get('pairs', [])
 
+        if not pairs:
+            logger.warning(f"No pairs found for contract: {contract_address}")
+            return None
+
         for pair in pairs:
             if 'marketCap' in pair:
                 market_cap = float(pair['marketCap'])
@@ -85,7 +89,7 @@ def send_new_token_message(token):
     except Exception as e:
         logger.error(f"Failed to send new token message: {e}")
 
-# Check for new tokens added to the database every 2 minutes
+# Check for new tokens added to the database every 1 minute
 def check_for_new_tokens():
     logger.info("Checking for newly added tokens...")
     conn = None
@@ -143,7 +147,7 @@ def update_token_notified_at(token_id):
         if conn is not None:
             conn.close()
 
-# Check all tokens every 30 minutes for market cap to buy or track gains
+# Check all tokens every 1 minute for market cap to buy or track gains
 def check_market_caps_for_all_tokens():
     logger.info("Checking market caps for all tokens...")
     conn = None
@@ -161,7 +165,8 @@ def check_market_caps_for_all_tokens():
 
         for token in tokens:
             contract_address = token['contract_address']
-            try_buy_at_mc = token['try_buy_at_mc']
+            try_buy_at_min = token['try_buy_at_min']
+            try_buy_at_max = token['try_buy_at_max']
             token_name = token['token_name']
             initial_market_cap = token['initial_market_cap']
             last_notified_multiple = token['last_notified_multiple'] or 1
@@ -176,28 +181,23 @@ def check_market_caps_for_all_tokens():
             if isinstance(initial_market_cap, Decimal):
                 initial_market_cap = float(initial_market_cap)
 
-            # Check if market cap meets buy conditions or achieves multiples
-            logger.info(f"Checking token {token_name} for gains - Current Market Cap: {market_cap}, Try Buy At: {try_buy_at_mc}")
-
-            if token['notified_at'] is None:
-                # Check if market cap is less than or equal to try_buy_at_mc
-                if market_cap <= try_buy_at_mc:
-                    logger.info(f"Condition met for buy initiated - {token_name}: {market_cap} <= {try_buy_at_mc}")
-                    send_buy_initiated_message(token, market_cap)
-                    update_token_after_buy_initiated(token['id'], market_cap)
-                else:
-                    logger.info(f"Condition NOT met for {token_name} - Market Cap: {market_cap}, Try Buy At: {try_buy_at_mc}")
+            # Check if market cap is within buy zone range
+            if market_cap >= try_buy_at_min and market_cap <= try_buy_at_max:
+                logger.info(f"Token {token_name} entered buy zone: {try_buy_at_min} <= {market_cap} <= {try_buy_at_max}")
+                send_token_in_buy_zone_message(token, market_cap)
+                update_token_after_buy_initiated(token['id'], market_cap)
             else:
-                if initial_market_cap > 0:
-                    multiple = market_cap / initial_market_cap
-                    multiples_to_check = [5, 7, 10, 15, 20, 25, 50, 100, 200, 250, 300, 400, 500, 750, 1000, 2000, 5000, 10000]
-                    for m in multiples_to_check:
-                        if multiple >= m and last_notified_multiple < m:
-                            send_multiple_achieved_message(token, market_cap, m)
-                            update_last_notified_multiple(token['id'], m)
-                            break
-                else:
-                    logger.warning(f"Initial market cap is not set or is zero for {token_name}.")
+                logger.info(f"Token {token_name} not in buy zone - Market Cap: {market_cap}, Range: {try_buy_at_min}-{try_buy_at_max}")
+            
+            # Check for market cap multiples (gains)
+            if initial_market_cap > 0:
+                multiple = market_cap / initial_market_cap
+                multiples_to_check = [5, 7, 10, 15, 20, 25, 50, 100, 200, 250, 300, 400, 500]
+                for m in multiples_to_check:
+                    if multiple >= m and last_notified_multiple < m:
+                        send_multiple_achieved_message(token, market_cap, m)
+                        update_last_notified_multiple(token['id'], m)
+                        break
 
             time.sleep(1)  # Sleep to avoid rate limits
     except mysql.connector.Error as err:
@@ -208,12 +208,12 @@ def check_market_caps_for_all_tokens():
         if conn is not None:
             conn.close()
 
-# Send buy initiated message
-def send_buy_initiated_message(token, market_cap):
+# Send message when token enters buy zone
+def send_token_in_buy_zone_message(token, market_cap):
     try:
         market_cap_text = f"${market_cap:,.2f}" if market_cap else "N/A"
         message = (
-            f"🚀 *Buy Initiated!*\n\n"
+            f"🚀 *Token Entered Buy Zone!* ${token['try_buy_at_min']:,.2f} - ${token['try_buy_at_max']:,.2f}\n\n"
             f"🔹 *Token Name:* {token['token_name']}\n"
             f"🌐 *Chain:* {token['chain']}\n"
             f"🔹 *Contract Address:* `{token['contract_address']}`\n"
@@ -226,37 +226,9 @@ def send_buy_initiated_message(token, market_cap):
             parse_mode=ParseMode.MARKDOWN,
             disable_web_page_preview=True
         )
-        logger.info(f"Buy initiated message sent for {token['token_name']}.")
+        logger.info(f"Buy zone message sent for {token['token_name']}.")
     except Exception as e:
-        logger.error(f"Failed to send buy initiated message: {e}")
-
-# Update token after buy initiated
-def update_token_after_buy_initiated(token_id, market_cap):
-    conn = None
-    cursor = None
-    try:
-        conn = mysql.connector.connect(
-            host=os.getenv('DB_HOST'),
-            user=os.getenv('DB_USER'),
-            password=os.getenv('DB_PASSWORD'),
-            database=os.getenv('DB_NAME')
-        )
-        cursor = conn.cursor()
-        update_query = """
-            UPDATE token_details
-            SET notified_at = %s, initial_market_cap = %s
-            WHERE id = %s
-        """
-        cursor.execute(update_query, (datetime.utcnow(), market_cap, token_id))
-        conn.commit()
-        logger.info(f"Token {token_id} updated after buy initiated.")
-    except mysql.connector.Error as err:
-        logger.error(f"Error updating token after buy initiated: {err}")
-    finally:
-        if cursor is not None:
-            cursor.close()
-        if conn is not None:
-            conn.close()
+        logger.error(f"Failed to send buy zone message: {e}")
 
 # Send multiple achieved notification
 def send_multiple_achieved_message(token, market_cap, multiple):
@@ -279,6 +251,34 @@ def send_multiple_achieved_message(token, market_cap, multiple):
         logger.info(f"{multiple}x achieved message sent for {token['token_name']}.")
     except Exception as e:
         logger.error(f"Failed to send multiple achieved message: {e}")
+
+# Update token after buy initiated
+def update_token_after_buy_initiated(token_id, market_cap):
+    conn = None
+    cursor = None
+    try:
+        conn = mysql.connector.connect(
+            host=os.getenv('DB_HOST'),
+            user=os.getenv('DB_USER'),
+            password=os.getenv('DB_PASSWORD'),
+            database=os.getenv('DB_NAME')
+        )
+        cursor = conn.cursor()
+        update_query = """
+            UPDATE token_details
+            SET notified_at = %s, initial_market_cap = %s
+            WHERE id = %s
+        """
+        cursor.execute(update_query, (datetime.utcnow(), market_cap, token_id))
+        conn.commit()
+        logger.info(f"Token {token_id} updated after entering buy zone.")
+    except mysql.connector.Error as err:
+        logger.error(f"Error updating token after buy zone: {err}")
+    finally:
+        if cursor is not None:
+            cursor.close()
+        if conn is not None:
+            conn.close()
 
 # Update the last notified multiple in the database
 def update_last_notified_multiple(token_id, multiple):
@@ -312,11 +312,11 @@ def update_last_notified_multiple(token_id, multiple):
 def main():
     scheduler = BackgroundScheduler(timezone='UTC')
     
-    # Schedule to check for new tokens every 2 minute
-    scheduler.add_job(check_for_new_tokens, 'interval', minutes=2)
+    # Schedule to check for new tokens every 1 minute
+    scheduler.add_job(check_for_new_tokens, 'interval', minutes=1)
 
-    # Schedule to check all tokens for buy conditions and gains every 120 minute
-    scheduler.add_job(check_market_caps_for_all_tokens, 'interval', minutes=120)
+    # Schedule to check all tokens for buy conditions and gains every 1 minute
+    scheduler.add_job(check_market_caps_for_all_tokens, 'interval', minutes=1)
 
     scheduler.start()
     logger.info("Scheduler started.")

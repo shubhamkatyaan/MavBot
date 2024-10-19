@@ -34,7 +34,7 @@ DEXSCREENER_API_URL = "https://api.dexscreener.com/latest/dex/tokens/"
     BUY_TAX,
     SELL_TAX,
     TRANSFER_TAX,
-    TRY_BUY_AT,
+    TRY_BUY_AT_RANGE,
     CHAIN,
     CONFIRMATION,
     SELECT_TOKEN,
@@ -61,18 +61,20 @@ def token_name(update: Update, context: CallbackContext) -> int:
 
 def contract_address(update: Update, context: CallbackContext) -> int:
     context.user_data['contract_address'] = update.message.text.strip()  # No validation check
-    update.message.reply_text("📈 Enter the *'Try Buy At'* market cap value (e.g., 10000):")
-    return TRY_BUY_AT
+    update.message.reply_text("📈 Enter the *'Try Buy At'* market cap range (e.g., 5000-10000):")
+    return TRY_BUY_AT_RANGE
 
-def try_buy_at(update: Update, context: CallbackContext) -> int:
+def try_buy_at_range(update: Update, context: CallbackContext) -> int:
     try:
-        try_buy_at_value = float(update.message.text.strip())
-        context.user_data['try_buy_at_mc'] = try_buy_at_value
+        try_buy_at_range = update.message.text.strip()
+        try_buy_at_min, try_buy_at_max = map(float, try_buy_at_range.split('-'))
+        context.user_data['try_buy_at_min'] = try_buy_at_min
+        context.user_data['try_buy_at_max'] = try_buy_at_max
         update.message.reply_text("🔗 Please enter the *chain* of the token (e.g., Ethereum, BSC):")
         return CHAIN
     except ValueError:
-        update.message.reply_text("Please enter a valid number for 'Try Buy At':")
-        return TRY_BUY_AT
+        update.message.reply_text("Please enter a valid range for 'Try Buy At' (e.g., 5000-10000):")
+        return TRY_BUY_AT_RANGE
 
 def chain(update: Update, context: CallbackContext) -> int:
     context.user_data['chain'] = update.message.text.strip()
@@ -143,7 +145,7 @@ def transfer_tax(update: Update, context: CallbackContext) -> int:
             f"💰 *Buy Tax:* {context.user_data['buy_tax']}%\n"
             f"💸 *Sell Tax:* {context.user_data['sell_tax']}%\n"
             f"💼 *Transfer Tax:* {context.user_data['transfer_tax']}%\n"
-            f"📈 *Try Buy At:* {context.user_data['try_buy_at_mc']}\n\n"
+            f"📈 *Try Buy At Range:* ${context.user_data['try_buy_at_min']} - ${context.user_data['try_buy_at_max']}\n\n"
             f"✅ Type 'yes' to confirm or 'no' to cancel."
         )
         return CONFIRMATION
@@ -178,8 +180,8 @@ def store_in_db(data: dict):
         insert_query = """
             INSERT INTO token_details
             (contract_address, token_name, liquidity_locked, ownership_renounced, liquidity_burned,
-             buy_tax, sell_tax, transfer_tax, try_buy_at_mc, chain, initial_market_cap, timestamp)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW())
+             buy_tax, sell_tax, transfer_tax, try_buy_at_min, try_buy_at_max, chain, initial_market_cap, timestamp)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW())
         """
         market_cap = get_market_cap_from_dexscreener(data['contract_address'])
         cursor.execute(insert_query, (
@@ -191,7 +193,8 @@ def store_in_db(data: dict):
             data['buy_tax'],
             data['sell_tax'],
             data['transfer_tax'],
-            data['try_buy_at_mc'],
+            data['try_buy_at_min'],
+            data['try_buy_at_max'],
             data['chain'],
             market_cap
         ))
@@ -239,7 +242,7 @@ def view_tokens(update, context):
             database=os.getenv('DB_NAME')
         )
         cursor = conn.cursor(dictionary=True)
-        cursor.execute("SELECT token_name, contract_address, try_buy_at_mc FROM token_details")
+        cursor.execute("SELECT token_name, contract_address, try_buy_at_min, try_buy_at_max FROM token_details")
         tokens = cursor.fetchall()
 
         if not tokens:
@@ -251,7 +254,7 @@ def view_tokens(update, context):
             market_cap = get_market_cap_from_dexscreener(token['contract_address'])
             if market_cap is not None:
                 message_lines.append(
-                    f"{token['token_name']}: Current MC: ${market_cap:,.2f}, Try Buy At: ${token['try_buy_at_mc']:,.2f}"
+                    f"{token['token_name']}: Current MC: ${market_cap:,.2f}, Try Buy At Range: ${token['try_buy_at_min']:,.2f} - ${token['try_buy_at_max']:,.2f}"
                 )
             else:
                 message_lines.append(f"{token['token_name']}: Could not fetch market cap")
@@ -340,7 +343,7 @@ def select_token(update: Update, context: CallbackContext) -> int:
 
     fields = [
         'token_name', 'chain', 'liquidity_locked', 'ownership_renounced',
-        'liquidity_burned', 'buy_tax', 'sell_tax', 'transfer_tax', 'try_buy_at_mc'
+        'liquidity_burned', 'buy_tax', 'sell_tax', 'transfer_tax', 'try_buy_at_min', 'try_buy_at_max'
     ]
     field_keyboard = [[field] for field in fields]
     reply_markup = ReplyKeyboardMarkup(field_keyboard, one_time_keyboard=True)
@@ -351,7 +354,7 @@ def edit_field(update: Update, context: CallbackContext) -> int:
     field = update.message.text.strip()
     valid_fields = [
         'token_name', 'chain', 'liquidity_locked', 'ownership_renounced',
-        'liquidity_burned', 'buy_tax', 'sell_tax', 'transfer_tax', 'try_buy_at_mc'
+        'liquidity_burned', 'buy_tax', 'sell_tax', 'transfer_tax', 'try_buy_at_min', 'try_buy_at_max'
     ]
     if field not in valid_fields:
         update.message.reply_text("Invalid field. Please select a valid field to edit.")
@@ -366,7 +369,7 @@ def update_field(update: Update, context: CallbackContext) -> int:
     new_value = update.message.text.strip()
     token = context.user_data['token']
 
-    if field in ['buy_tax', 'sell_tax', 'transfer_tax', 'try_buy_at_mc']:
+    if field in ['buy_tax', 'sell_tax', 'transfer_tax', 'try_buy_at_min', 'try_buy_at_max']:
         try:
             new_value = float(new_value)
         except ValueError:
@@ -431,7 +434,7 @@ def main():
         states={
             TOKEN_NAME: [MessageHandler(Filters.text & ~Filters.command, token_name)],
             CONTRACT_ADDRESS: [MessageHandler(Filters.text & ~Filters.command, contract_address)],
-            TRY_BUY_AT: [MessageHandler(Filters.text & ~Filters.command, try_buy_at)],
+            TRY_BUY_AT_RANGE: [MessageHandler(Filters.text & ~Filters.command, try_buy_at_range)],
             CHAIN: [MessageHandler(Filters.text & ~Filters.command, chain)],
             LIQUIDITY_LOCKED: [MessageHandler(Filters.text & ~Filters.command, liquidity_locked)],
             OWNERSHIP_RENOUNCED: [MessageHandler(Filters.text & ~Filters.command, ownership_renounced)],
