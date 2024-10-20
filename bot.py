@@ -2,9 +2,11 @@ import os
 import logging
 from telegram import ReplyKeyboardMarkup, Update, ParseMode
 from telegram.ext import Updater, CommandHandler, MessageHandler, Filters, ConversationHandler, CallbackContext
+from telegram.error import RetryAfter, NetworkError
 import mysql.connector
 from dotenv import load_dotenv
 import requests
+import time
 
 # Load environment variables from .env file
 load_dotenv()
@@ -45,6 +47,19 @@ DEXSCREENER_API_URL = "https://api.dexscreener.com/latest/dex/tokens/"
 
 def check_user(update: Update) -> bool:
     return update.effective_user.id == ALLOWED_USER_ID
+
+# Send message with retry after handling flood control
+def send_message_with_retry(bot, chat_id, text):
+    try:
+        bot.send_message(chat_id=chat_id, text=text, parse_mode=ParseMode.MARKDOWN)
+    except RetryAfter as e:
+        logger.warning(f"Flood control exceeded. Retry after {e.retry_after} seconds")
+        time.sleep(e.retry_after)
+        send_message_with_retry(bot, chat_id, text)  # Retry after waiting
+    except NetworkError as e:
+        logger.error(f"Network error: {e}. Retrying after 5 seconds...")
+        time.sleep(5)
+        send_message_with_retry(bot, chat_id, text)
 
 # ----- START FUNCTION -----
 def start(update: Update, context: CallbackContext) -> int:

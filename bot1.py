@@ -77,7 +77,8 @@ def send_new_token_message(token):
             f"🔥 *Liquidity Burned:* {token['liquidity_burned']}\n"
             f"💰 *Buy Tax:* {token['buy_tax']}%\n"
             f"💸 *Sell Tax:* {token['sell_tax']}%\n"
-            f"💼 *Transfer Tax:* {token['transfer_tax']}%\n\n"
+            f"💼 *Transfer Tax:* {token['transfer_tax']}%\n"
+            f"🚀 *Buy Zone MC* ${token['try_buy_at_min']:,.2f} - ${token['try_buy_at_max']:,.2f}\n\n"
         )
         second_bot.send_message(
             chat_id=GROUP_CHAT_ID,
@@ -147,7 +148,7 @@ def update_token_notified_at(token_id):
         if conn is not None:
             conn.close()
 
-# Check all tokens every 1 minute for market cap to buy or track gains
+# Check all tokens for market cap to track buy zone or gains
 def check_market_caps_for_all_tokens():
     logger.info("Checking market caps for all tokens...")
     conn = None
@@ -181,13 +182,13 @@ def check_market_caps_for_all_tokens():
             if isinstance(initial_market_cap, Decimal):
                 initial_market_cap = float(initial_market_cap)
 
-            # Check if market cap is within buy zone range
-            if market_cap >= try_buy_at_min and market_cap <= try_buy_at_max:
+            # Check if market cap is within buy zone range and not notified yet
+            if market_cap >= try_buy_at_min and market_cap <= try_buy_at_max and token['buy_zone_notified_at'] is None:
                 logger.info(f"Token {token_name} entered buy zone: {try_buy_at_min} <= {market_cap} <= {try_buy_at_max}")
                 send_token_in_buy_zone_message(token, market_cap)
                 update_token_after_buy_initiated(token['id'], market_cap)
             else:
-                logger.info(f"Token {token_name} not in buy zone - Market Cap: {market_cap}, Range: {try_buy_at_min}-{try_buy_at_max}")
+                logger.info(f"Token {token_name} not in buy zone or already notified - Market Cap: {market_cap}, Range: {try_buy_at_min}-{try_buy_at_max}")
             
             # Check for market cap multiples (gains)
             if initial_market_cap > 0:
@@ -266,10 +267,10 @@ def update_token_after_buy_initiated(token_id, market_cap):
         cursor = conn.cursor()
         update_query = """
             UPDATE token_details
-            SET notified_at = %s, initial_market_cap = %s
+            SET notified_at = %s, initial_market_cap = %s, buy_zone_notified_at = %s
             WHERE id = %s
         """
-        cursor.execute(update_query, (datetime.utcnow(), market_cap, token_id))
+        cursor.execute(update_query, (datetime.utcnow(), market_cap, datetime.utcnow(), token_id))
         conn.commit()
         logger.info(f"Token {token_id} updated after entering buy zone.")
     except mysql.connector.Error as err:
@@ -313,10 +314,10 @@ def main():
     scheduler = BackgroundScheduler(timezone='UTC')
     
     # Schedule to check for new tokens every 1 minute
-    scheduler.add_job(check_for_new_tokens, 'interval', minutes=1)
+    scheduler.add_job(check_for_new_tokens, 'interval', minutes=2)
 
     # Schedule to check all tokens for buy conditions and gains every 1 minute
-    scheduler.add_job(check_market_caps_for_all_tokens, 'interval', minutes=1)
+    scheduler.add_job(check_market_caps_for_all_tokens, 'interval', minutes=30)
 
     scheduler.start()
     logger.info("Scheduler started.")
